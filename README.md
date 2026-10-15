@@ -84,6 +84,43 @@ Then:
 expert in host memory, from where the cache takes the hot ones. Peak VRAM with
 a 5800 MiB cache and a small context was 7.3 GB.
 
+## Long context
+
+    ./run-ornith27b.sh    # 256K; CTX=128k, 64k or 16k leave room for more experts
+
+Ornith's context goes up to 262,144 tokens. Only its 10 full-attention layers
+keep a KV cache, of 2 heads of 256, so the whole context takes 2720 MiB in q8_0
+(1440 MiB in q4_0); the other 30 layers are Gated DeltaNet, whose state does
+not grow. The KV cache takes VRAM from the expert cache, and the two must leave
+the card below about 7.9 GB: past that, the driver moved 580 MiB of buffers to
+system memory (`mem_info_gtt_used` went from 374 to 955 MiB). At 256K with
+the KV cache in q4_0, an expert cache of 5000 MiB ran at 9.7 tokens/s, and one
+of 4500 MiB at 14.4-20.5; at 128K, 4900 MiB (8078 MiB of VRAM in use) at 13.1,
+and 4500 MiB at 22.7.
+
+llama-server with the KV cache in q8_0, a 256-token code answer, then a prompt
+of 9650 tokens with a 128-token answer:
+
+| Context | Expert cache | VRAM | answer | prompt | answer after it |
+|---|---:|---:|---:|---:|---:|
+| 16K | 5600 MiB | 7475 MiB | 24.1 | 133 | 25.4 |
+| 64K | 5100 MiB | 7532 MiB | 22.9 | 123 | 23.1 |
+| 128K | 4500 MiB | 7677 MiB | 22.7 | 106 | 20.7 |
+| 256K | 3200 MiB | 7865 MiB | 14.9 | 88 | 17.0 |
+| 256K, KV in q4_0 | 4500 MiB | 7886 MiB | 14.4, 20.5 | 83 | 16.0 |
+
+A chat grown to 50,504 tokens in the 256K context: its first prompt took 661 s
+(76 tokens/s) and the answer came at 9.0 tokens/s; the next turn processed only
+its 26 new tokens (1.6 s) and answered at 12.4 tokens/s.
+
+Runs with the same settings differ, as the 16 GB file does not fit in the
+15.7 GB of RAM: the experts the CPU computes are read from the SSD when the page
+cache has dropped them. Over one short and one long request, the faster runs
+took 132-135 thousand major page faults for 9-10 GB (about 75 KB each); a run at
+half the speed, with q8_0 keys and q4_0 values (9.5 and 8.2 tokens/s), took 1.6
+million for 8.5 GB (about 5 KB each), and the 50K chat 1.6 million for 5.8 GB.
+The launcher's first answer at 256K, right after loading, came at 10.0 tokens/s.
+
 ## Qwen3.8-27B (dense)
 
     ./run-qwen27b.sh      # opens http://127.0.0.1:8080 once the model has loaded
@@ -179,6 +216,7 @@ the real file.
 ## Files
 
 - `run-qwen27b.sh`: starts Qwen3.8-27B with the settings measured above
+- `run-ornith27b.sh`: starts Ornith-1.5-27B-A3B-CoderX in hybrid mode with a long context
 - `llama.cpp/`: the fork, branch `hybrid-moe`, on GitHub as
   [llama.cpp-hybrid-moe](https://github.com/MohammadR3za/llama.cpp-hybrid-moe)
   (git-ignored here, see `patches/`); its changes are up for review as pull request 1 there
@@ -195,3 +233,6 @@ the real file.
   cache size, thread count, prompt processing speed in hybrid mode.
 - Speculative decoding with the model's MTP head (`--spec-type draft-mtp`):
   verifying 2-3 tokens per pass would spread the per-layer sync over them.
+- Reading ahead the experts the CPU is about to compute (`madvise`), so that
+  the SSD reads them in large pieces and not in the 5 KB of the slow runs
+  under "Long context".
