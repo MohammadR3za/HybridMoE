@@ -147,6 +147,35 @@ The script's other settings:
 Prompts: 55 tokens/s in 512-token batches (the GPU computes the CPU's layers
 too, copying their weights over PCIe), 15 for a 16-token prompt, 28 for 64.
 
+### Swift-1.5's IQ3 files
+
+[Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF)
+is a fine-tune of this model whose card claims 58.5% fewer thinking tokens. Its
+files mix IQ1 to IQ4 types tensor by tensor. Speed depends on the types and not
+on the values, so it was measured in copies of the Q4_K_M file requantized to
+the exact types of its IQ3_XXS-mtp and IQ3_S-mtp files (`--tensor-type-file`
+with anchored names, and an importance matrix of ones). Code at temperature 0,
+256 tokens, MTP with 3 drafts, the script's settings:
+
+| File | GPU layers | VRAM | plain | MTP, `-t 8` | MTP, `-t 12` |
+|---|---:|---:|---:|---:|---:|
+| Q4_K_M, this one | 28 | 7750 MiB | 2.98 | 7.96 | - |
+| IQ3_XXS-mtp layout, 10.4 GB | 43 | 7941 MiB | 6.24 | 7.56 | 8.69 |
+| IQ3_S-mtp layout, 12.1 GB | 36 | 7784 MiB | 4.58 | 5.67 | 6.43 |
+
+One token is faster (160 and 235 ms against 347), but a check of 4 tokens costs
+as much as here or more (403 and 590 ms against 406, `llama-bench`): the CPU
+decodes an IQ weight again for every token of a batch. On IQ3_XXS the CPU's
+layers take 104 ms for 1 token and 296 ms for 4 (`GGML_SCHED_TIMING=1`). More
+threads help there, unlike with Q4_K: 12 threads cut the 4-token check by 11%
+and 14%, 16 and 20 no further, and the Q4_K_M's not at all (385 against 388 ms).
+Drafts were accepted alike in all three (3.56-3.61 tokens per pass).
+
+    MODEL=~/Downloads/Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf NGL=43 ./run-qwen27b.sh -t 12
+
+Not measured: its thinking length and the quality of its answers, which need
+the real file.
+
 ## Files
 
 - `run-qwen27b.sh`: starts Qwen3.8-27B with the settings measured above
