@@ -64,6 +64,17 @@ are copied to the GPU).
 
 ## Build and run
 
+The fork and two header-only Khronos packages are not part of this repository.
+In a fresh clone they go next to the scripts:
+
+    git clone -b hybrid-moe https://github.com/MohammadR3za/llama.cpp-hybrid-moe llama.cpp
+    git clone -b v1.4.363 https://github.com/KhronosGroup/Vulkan-Headers deps/vulkan-headers
+    git clone https://github.com/KhronosGroup/SPIRV-Headers deps/spirv-src
+    cmake -S deps/spirv-src -B deps/spirv-src/build -DCMAKE_INSTALL_PREFIX="$PWD/deps/spirv"
+    cmake --install deps/spirv-src/build
+
+Then:
+
     ./build.sh            # llama-bench, llama-cli, llama-server, llama-perplexity
 
     llama.cpp/build/bin/llama-server -m ~/Downloads/Ornith-1.5-27B-A3B-CoderX.Q4_K_M.gguf \
@@ -139,7 +150,9 @@ too, copying their weights over PCIe), 15 for a 16-token prompt, 28 for 64.
 ## Files
 
 - `run-qwen27b.sh`: starts Qwen3.8-27B with the settings measured above
-- `llama.cpp/`: the fork, branch `hybrid-moe` (git-ignored here, see `patches/`)
+- `llama.cpp/`: the fork, branch `hybrid-moe`, on GitHub as
+  [llama.cpp-hybrid-moe](https://github.com/MohammadR3za/llama.cpp-hybrid-moe)
+  (git-ignored here, see `patches/`); its changes are up for review as pull request 1 there
 - `patches/`: the fork's commits on top of upstream `a0e6dc738`
 - `bench/bench.py`: steady-state llama-bench runs, with disk reads; results in `bench/results.jsonl`
 - `tools/gguf_header.py`: reads a GGUF header, also of a partial download
