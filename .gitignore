@@ -1,0 +1,5 @@
+# the llama.cpp fork is its own git repository (branch hybrid-moe); patches/ carries its changes
+llama.cpp/
+# local copies of header-only Khronos packages, see build.sh
+deps/
+__pycache__/

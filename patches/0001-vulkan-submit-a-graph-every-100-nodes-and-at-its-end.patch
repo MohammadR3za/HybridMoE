@@ -1,0 +1,161 @@
+From 8f29b267e4a034b9e375c3a161baa711cf3c90e1 Mon Sep 17 00:00:00 2001
+From: mrm <mohammadrezam6731@gmail.com>
+Date: Thu, 15 Oct 2026 05:36:34 +0330
+Subject: [PATCH 1/2] vulkan: submit a graph every 100 nodes and at its end,
+ not by flops
+
+A submit cost the host 45-110 us on an RX 580 (RADV), more than most
+nodes of a token take the GPU, while recording a node took about 2 us.
+The early submits by flops made about 7 submits per graph, and a model
+split between the CPU and the GPU runs 50-82 small graphs per token.
+
+Measured on a 41-layer MoE (Ornith 27B-A3B Q4_K_M), host time per token
+74.8 -> 29.6 ms; tokens/s with 24 layers of experts on the CPU
+24.3 -> 28.4; a dense 9B model fully on the GPU 31.1 -> 31.6 in
+generation, prompt processing unchanged. GGML_VK_EARLY_SUBMITS=1
+restores the early submits; the flops cap for weak AMD GPUs stays.
+
+Also GGML_VK_TIMING=1, host time in graph compute, submits and fence
+waits; and the perf logger submits copies recorded before a graph.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 77 +++++++++++++++++++++++++++-
+ 1 file changed, 75 insertions(+), 2 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 8357f01fe..4f78cf509 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -336,7 +336,33 @@ static VkDeviceSize ggml_vk_get_max_buffer_range(const ggml_backend_vk_context *
+     return range;
+ }
+ 
++// GGML_VK_TIMING=1: host time spent in graph_compute, in vkQueueSubmit and in fence waits, printed every 4096 graphs;
++// a diagnostic for finding where the host waits for the device, off by default
++struct ggml_vk_timing {
++    int     enabled = -1;
++    int64_t n_graph = 0, t_graph = 0, n_submit = 0, t_submit = 0, n_wait = 0, t_wait = 0;
++};
++static ggml_vk_timing g_vk_timing;
++static bool ggml_vk_timing_on() {
++    if (g_vk_timing.enabled < 0) {
++        g_vk_timing.enabled = getenv("GGML_VK_TIMING") != nullptr;
++    }
++    return g_vk_timing.enabled > 0;
++}
++
++static void ggml_vk_wait_for_fence_impl(ggml_backend_vk_context * ctx);
+ void ggml_vk_wait_for_fence(ggml_backend_vk_context * ctx) {
++    if (!ggml_vk_timing_on()) {
++        ggml_vk_wait_for_fence_impl(ctx);
++        return;
++    }
++    const int64_t t0 = ggml_time_us();
++    ggml_vk_wait_for_fence_impl(ctx);
++    g_vk_timing.t_wait += ggml_time_us() - t0;
++    g_vk_timing.n_wait++;
++}
++
++static void ggml_vk_wait_for_fence_impl(ggml_backend_vk_context * ctx) {
+     // Use waitForFences while most of the graph executes. Hopefully the CPU can sleep
+     // during this wait.
+     if (ctx->almost_ready_fence_pending) {
+@@ -899,7 +925,19 @@ static vk_command_buffer* ggml_vk_create_cmd_buffer(vk_device& device, vk_comman
+     return &p.cmd_buffers[p.cmd_buffers.size()-1];
+ }
+ 
++static void ggml_vk_submit_impl(vk_context& ctx, vk::Fence fence);
+ void ggml_vk_submit(vk_context& ctx, vk::Fence fence) {
++    if (!ggml_vk_timing_on()) {
++        ggml_vk_submit_impl(ctx, fence);
++        return;
++    }
++    const int64_t t0 = ggml_time_us();
++    ggml_vk_submit_impl(ctx, fence);
++    g_vk_timing.t_submit += ggml_time_us() - t0;
++    g_vk_timing.n_submit++;
++}
++
++static void ggml_vk_submit_impl(vk_context& ctx, vk::Fence fence) {
+     if (ctx->seqs.empty()) {
+         if (fence) {
+             ctx->p->q->handle->submit({}, fence);
+@@ -14235,7 +14273,25 @@ static int32_t find_first_set(uint32_t x) {
+     return ret;
+ }
+ 
++static ggml_status ggml_backend_vk_graph_compute_impl(ggml_backend_t backend, ggml_cgraph * cgraph);
+ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
++    if (!ggml_vk_timing_on()) {
++        return ggml_backend_vk_graph_compute_impl(backend, cgraph);
++    }
++    ggml_vk_timing & tm = g_vk_timing;
++    const int64_t t0 = ggml_time_us();
++    const ggml_status res = ggml_backend_vk_graph_compute_impl(backend, cgraph);
++    tm.t_graph += ggml_time_us() - t0;
++    if (++tm.n_graph % 4096 == 0) {
++        GGML_LOG_INFO("vk timing: per graph %.3f ms, submits %.2f/graph %.3f ms, fence waits %.3f/graph %.3f ms\n",
++            tm.t_graph/1000.0/tm.n_graph, (double) tm.n_submit/tm.n_graph, tm.t_submit/1000.0/tm.n_graph,
++            (double) tm.n_wait/tm.n_graph, tm.t_wait/1000.0/tm.n_graph);
++        tm.n_graph = tm.t_graph = tm.n_submit = tm.t_submit = tm.n_wait = tm.t_wait = 0;
++    }
++    return res;
++}
++
++static ggml_status ggml_backend_vk_graph_compute_impl(ggml_backend_t backend, ggml_cgraph * cgraph) {
+     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
+     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+ 
+@@ -14294,6 +14350,10 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+         std::fill(ctx->query_nodes.begin(), ctx->query_nodes.end(), nullptr);
+         std::fill(ctx->query_node_idx.begin(), ctx->query_node_idx.end(), 0);
+ 
++        // copies recorded before the graph (an MoE cache's uploads) are submitted first, so the timestamps cover the graph only
++        if (!ctx->compute_ctx.expired()) {
++            ggml_vk_synchronize(ctx);
++        }
+         GGML_ASSERT(ctx->compute_ctx.expired());
+         compute_ctx = ggml_vk_get_compute_ctx(ctx);
+         ctx->query_idx = 0;
+@@ -14333,6 +14393,19 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+     }
+     uint64_t flops_per_submit = std::min(flops_cap, ctx->last_total_flops / 40u);
+ 
++    // The early submits by flops and the almost-ready fence are off unless GGML_VK_EARLY_SUBMITS is set: a graph is then
++    // submitted every max_nodes_per_submit nodes, every flops_cap flops (the driver timeout above) and at its end. On an
++    // RX 580 (RADV) a submit took the host 45-110 us, longer than most nodes of a token take the GPU, and recording a
++    // node about 2 us, so the early submits cost more than they overlap. A model split between the CPU and the GPU pays
++    // that at every layer: on a 41-layer MoE they made 7.2 submits per graph and 74.8 ms of host time per token, against
++    // 1.5 and 29.6 ms without. Measured in tokens/s: that MoE with its experts in the MoE cache 17.8 -> 32.6, with 24
++    // layers of experts on the CPU 24.3 -> 28.4, and a dense 9B model fully on the GPU 31.1 -> 31.6 in generation and
++    // 201.5 -> 200.0 (noise) in prompt processing.
++    static const bool early_submits = getenv("GGML_VK_EARLY_SUBMITS") != nullptr;
++    if (!early_submits) {
++        flops_per_submit = flops_cap;
++    }
++
+     auto const submit_after = [&](int start, int end) {
+         if (ctx->device->serialize_submissions) {
+             try {
+@@ -14357,7 +14430,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+         first_node_in_batch = true;
+         submitted_nodes = 0;
+         batch_flops = 0;
+-        if (submit_count < 3) {
++        if (early_submits && submit_count < 3) {
+             flops_per_submit *= 2;
+         }
+         submit_count++;
+@@ -14644,7 +14717,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+         }
+ 
+         // Signal the almost_ready fence when the graph is mostly complete (< 20% remaining)
+-        bool almost_ready = (cgraph->n_nodes - i) < cgraph->n_nodes / 5;
++        bool almost_ready = early_submits && (cgraph->n_nodes - i) < cgraph->n_nodes / 5;
+         bool submit = (submitted_nodes >= ctx->device->max_nodes_per_submit) ||
+                       (flops_per_submit != 0 && batch_flops >= flops_per_submit) ||
+                       (i + ctx->num_additional_fused_ops >= last_node) ||
+-- 
+2.56.0
+
