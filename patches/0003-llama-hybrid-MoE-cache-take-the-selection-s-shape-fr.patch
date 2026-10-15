@@ -1,0 +1,63 @@
+From b4120405a282e412c7dceb98bad42615593ad838 Mon Sep 17 00:00:00 2001
+From: mrm <mohammadrezam6731@gmail.com>
+Date: Thu, 15 Oct 2026 07:07:07 +0330
+Subject: [PATCH 3/3] llama: hybrid MoE cache, take the selection's shape from
+ the matmul's ids
+
+The lookup reads the selected experts as one flat row, so its ne[1] is
+1: a ubatch of 5 tokens was read as 1 token with 40 experts, and every
+missing expert was computed from the first token's input. Generation
+(one token per ubatch) was right; prompts of 2-32 tokens were not.
+
+Greedy completions of three prompts on Ornith 27B-A3B now match the
+stock layer split, as they did with -ub 1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/llama-moe-cache.cpp | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/src/llama-moe-cache.cpp b/src/llama-moe-cache.cpp
+index 31a833636..195e04e98 100644
+--- a/src/llama-moe-cache.cpp
++++ b/src/llama-moe-cache.cpp
+@@ -1040,16 +1040,22 @@ struct llama_moe_cache::impl {
+         const ggml_tensor * lookup = find_lookup(dst, graph, il);
+         const ggml_tensor * sel = lookup->src[1];
+ 
+-        // the layer input is the second operand of the first matmul that reads the cache
++        // the first matmul that reads the cache: its second operand is the layer input, one row per token, and its ids
++        // give the shape of the selection, which the lookup reads as one flat row
+         const ggml_tensor * first = get_experts(l.experts[0]);
+-        const ggml_tensor * xin = nullptr;
+-        for (int i = 0; i < ggml_graph_n_nodes(graph) && xin == nullptr; ++i) {
++        const ggml_tensor * mm = nullptr;
++        for (int i = 0; i < ggml_graph_n_nodes(graph) && mm == nullptr; ++i) {
+             const ggml_tensor * node = ggml_graph_node(graph, i);
+             if (node->op == GGML_OP_MUL_MAT_ID && node->src[0] == first) {
+-                xin = node->src[1];
++                mm = node;
+             }
+         }
+-        GGML_ASSERT(xin != nullptr && xin->type == GGML_TYPE_F32 && ggml_is_contiguous(xin));
++        GGML_ASSERT(mm != nullptr);
++        const ggml_tensor * xin = mm->src[1];
++        const int64_t n_used   = mm->src[2]->ne[0];
++        const int64_t n_tokens = mm->src[2]->ne[1];
++        GGML_ASSERT(xin->type == GGML_TYPE_F32 && ggml_is_contiguous(xin) && xin->ne[1] == 1 && xin->ne[2] == n_tokens);
++        GGML_ASSERT(ggml_nelements(sel) == n_used*n_tokens);
+ 
+         // the previous layer's job ends in its copy_cpu_out, this only matters if a graph skipped it
+         if (job_running) {
+@@ -1075,8 +1081,6 @@ struct llama_moe_cache::impl {
+         x_cur = p_x;
+         io.stage_used = 0;
+ 
+-        const int64_t n_used   = sel->ne[0];
+-        const int64_t n_tokens = sel->ne[1];
+         const int32_t n_expert = (int32_t) l.slot_map->ne[1];
+         int32_t * slots = g.lru.slot_map[il];
+ 
+-- 
+2.56.0
+
