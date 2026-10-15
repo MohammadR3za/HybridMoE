@@ -73,8 +73,72 @@ are copied to the GPU).
 expert in host memory, from where the cache takes the hot ones. Peak VRAM with
 a 5800 MiB cache and a small context was 7.3 GB.
 
+## Qwen3.8-27B (dense)
+
+    ./run-qwen27b.sh      # opens http://127.0.0.1:8080 once the model has loaded
+
+The script starts llama-server with the settings below and opens the chat page
+when the model is ready: 40 s from the SSD, 12-14 s while the file is still in
+the page cache. This llama.cpp's server listens on port 9931 unless given
+`--port`, so a command without it seemed not to start at all.
+
+The model (Qwen3.8 27B Abliterated, Q4_K_M, 16.8 GB) is dense: 64 layers, three
+Gated DeltaNet layers to each full-attention one, and one MTP layer. Its 248K
+vocabulary makes the output head alone 995 MiB of Q6_K. `-ngl 28` puts the head
+and blocks 38-64 on the RX 580 (7.0 GB), and the CPU reads blocks 0-37, 8.75 GB,
+from RAM for every token. The RAM is a single DDR5-4800 module, one channel of
+38 GB/s, so plain generation runs at about 3 tokens/s.
+
+With the model's MTP head (`--spec-type draft-mtp --spec-draft-n-max 3`), the
+GPU drafts 3 tokens (7.5 ms each) and the full model checks them in one pass,
+which costs little more than one token while the CPU's share is bound by memory:
+404 ms for a batch of 4 against 340-386 ms for 1 (`llama-bench -p 1,2,4,8`;
+8 tokens take 844 ms, compute-bound). Plain generation is 2.94-2.98 tokens/s
+whatever the text; with MTP, llama-server, 256 tokens per request:
+
+| Request | MTP, 3 drafts | tokens per pass |
+|---|---:|---:|
+| code, temperature 0, no thinking | 7.79 | 3.7 |
+| chat with thinking, the model's sampling (temp 1.0, top-k 20), 3 prompts | 5.20 | 2.5 |
+
+At temperature 0 the text is identical with and without drafts.
+
+Measured and not used:
+
+- 2 drafts: 5.16 on chat. 4 drafts: 7.93 on code. Drafts sampled and checked by
+  rejection sampling (`--spec-draft-sampling probabilistic`): the same acceptance.
+- `-t 12` and `-t 16`: within 2% of `-t 8`.
+- Repacked CPU weights (`--no-host`): 2.92 plain against 2.98, 7.54 with MTP
+  against 7.82, and prompts at 28.5 tokens/s against 55.5, as repacked weights
+  cannot be copied to the GPU for large batches.
+- Pinned host memory (`--load-mode none`): the RX 580's context was lost
+  (`ErrorDeviceLost`; kernel: "Not enough memory for command submission").
+- The iGPU for blocks 0-37 (`-dev Vulkan0/Vulkan1 -ts 38/28`): 1.83 plain,
+  prompts at 19.6.
+- 29 and 30 GPU layers, with the 16K context below: 7.04 and 6.66 against 7.79,
+  with 8.0 and 8.2 of the 8 GB in use.
+- A Q3_K_M copy, requantized from this file to measure its speed (12.9 GiB):
+  3.99 plain against 2.94, but 8.13 with MTP at 34 GPU layers against 7.79.
+  Q3_K costs more to compute, and the 4-token check is compute-bound on it.
+
+The script's other settings:
+
+- A 16K context with the KV cache in q8_0 (target and draft) and
+  `--spec-draft-n-ubatch 16`: 7750 MiB, as fast as 8K in f16 (7.79 against 7.82).
+- `--ctx-checkpoints 4 --cache-ram 1024`: the server's defaults allow 32 copies
+  of the recurrent state (150 MiB each here) and 8 GB of old prompts, RAM that
+  the 9 GB of weights the CPU reads need.
+- The fork drops the page cache of the weights a GPU holds once they are
+  uploaded (patch 0004). With 15.7 GB of RAM: 0.75 GB free after loading before,
+  4.2 GB after; 14239 major page faults in 15 s of generation before, 79 after;
+  6.99 tokens/s before, 7.24 after.
+
+Prompts: 55 tokens/s in 512-token batches (the GPU computes the CPU's layers
+too, copying their weights over PCIe), 15 for a 16-token prompt, 28 for 64.
+
 ## Files
 
+- `run-qwen27b.sh`: starts Qwen3.8-27B with the settings measured above
 - `llama.cpp/`: the fork, branch `hybrid-moe` (git-ignored here, see `patches/`)
 - `patches/`: the fork's commits on top of upstream `a0e6dc738`
 - `bench/bench.py`: steady-state llama-bench runs, with disk reads; results in `bench/results.jsonl`

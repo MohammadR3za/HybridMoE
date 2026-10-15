@@ -1,7 +1,7 @@
 From eed95add284069f0d93a8237dcf394b3b20f7fe7 Mon Sep 17 00:00:00 2001
 From: mrm <mohammadrezam6731@gmail.com>
 Date: Thu, 15 Oct 2026 05:36:34 +0330
-Subject: [PATCH 2/3] llama: hybrid MoE cache, the CPU computes the experts
+Subject: [PATCH 2/4] llama: hybrid MoE cache, the CPU computes the experts
  missing from VRAM
 
 --moe-hybrid N (with --moe-cache-mib): the experts not in the cache map

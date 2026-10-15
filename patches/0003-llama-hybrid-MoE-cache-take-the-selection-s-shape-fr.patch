@@ -1,7 +1,7 @@
 From b4120405a282e412c7dceb98bad42615593ad838 Mon Sep 17 00:00:00 2001
 From: mrm <mohammadrezam6731@gmail.com>
 Date: Thu, 15 Oct 2026 07:07:07 +0330
-Subject: [PATCH 3/3] llama: hybrid MoE cache, take the selection's shape from
+Subject: [PATCH 3/4] llama: hybrid MoE cache, take the selection's shape from
  the matmul's ids
 
 The lookup reads the selected experts as one flat row, so its ne[1] is

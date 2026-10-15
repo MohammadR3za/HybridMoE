@@ -1,0 +1,55 @@
+From 20a7aab5e911e77c8b4c686cbdeebb18409e398c Mon Sep 17 00:00:00 2001
+From: mrm <mohammadrezam6731@gmail.com>
+Date: Thu, 15 Oct 2026 14:53:15 +0330
+Subject: [PATCH 4/4] llama: drop the page cache of the weights a GPU holds,
+ after unmapping them
+
+munmap leaves the file's pages in the page cache, so after loading a model
+split between a GPU and the CPU, the weights the GPU now holds compete for RAM
+with the ones the CPU reads for every token. With Qwen3.8-27B Q4_K_M (16.8 GB)
+on 15.7 GB of RAM, -ngl 28: 0.75 GB free after loading, and while generating
+the server faulted the CPU's share back in from the SSD (14239 major faults,
+60 MB in 15 s). With posix_fadvise(POSIX_FADV_DONTNEED) after the munmap:
+4.2 GB free, 79 faults and 13 MB in 15 s, 6.99 -> 7.24 tokens/s.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/llama-mmap.cpp | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/src/llama-mmap.cpp b/src/llama-mmap.cpp
+index 80a719670..324c04eb3 100644
+--- a/src/llama-mmap.cpp
++++ b/src/llama-mmap.cpp
+@@ -478,10 +478,11 @@ static llama_mmap::ranges ranges_complement(llama_mmap::ranges ranges, size_t li
+ struct llama_mmap::impl {
+ #ifdef _POSIX_MAPPED_FILES
+     std::vector<std::pair<size_t, size_t>> mapped_fragments;
++    int fd = -1; // for unmap_fragment(), which the loader only calls while the file is open
+ 
+     impl(struct llama_file * file, size_t prefetch, bool numa, const llama_mmap::ranges & lazy_ranges) {
+         size = file->size();
+-        int fd = file->file_id();
++        fd = file->file_id();
+         int flags = MAP_SHARED;
+         if (numa) { prefetch = 0; }
+ #ifdef __linux__
+@@ -558,6 +559,15 @@ struct llama_mmap::impl {
+         if (munmap(next_page_start, len)) {
+             LLAMA_LOG_WARN("warning: munmap failed: %s\n", strerror(errno));
+         }
++#ifdef __linux__
++        // munmap leaves the pages in the page cache, where the weights a GPU now holds compete with the ones
++        // the CPU reads for every token. With Qwen3.8-27B Q4_K_M (16.8 GB) on 15.7 GB of RAM they took 2-7 GB
++        // of it, and the CPU's share was paged back in from the SSD at ~950 faults/s while generating.
++        // The kernel only drops pages nobody maps, so this has to come after the munmap.
++        if (fd >= 0 && posix_fadvise(fd, first, len, POSIX_FADV_DONTNEED)) {
++            LLAMA_LOG_WARN("warning: posix_fadvise(.., POSIX_FADV_DONTNEED) failed: %s\n", strerror(errno));
++        }
++#endif
+ 
+         std::vector<std::pair<size_t, size_t>> new_mapped_fragments;
+         for (const auto & frag : mapped_fragments) {
+-- 
+2.56.0
+
