@@ -123,6 +123,8 @@ The launcher's first answer at 256K, right after loading, came at 10.0 tokens/s.
 
 ## LFM2.5-24B-A2B
 
+    ./run-lfm25.sh    # 32K context; CTX=128k for the whole 128K
+
 LFM2.5-24B-A2B Q4_K_M (13.5 GiB, `lfm2moe`) has 40 blocks, 2
 of them dense and 38 with 64 experts of which 4 are used; 10 blocks have attention
 (8 KV heads, so about 11 KiB of KV per token in q8_0, computed from the file's
@@ -158,8 +160,9 @@ at 14-33 tokens/s while the file is read into the page cache, and then:
 
 | Context | Expert cache | tokens/s |
 |---|---:|---:|
-| 32K | 5800 MiB | 34-36 |
-| 128K | 5000 MiB | 26 |
+| 32K, 1 replacement per step | 5800 MiB | 34-36 |
+| 32K, no replacements (the launcher) | 5800 MiB | 32-36 |
+| 128K, no replacements (the launcher) | 5000 MiB | 26 |
 | 4K, KV in f16, no replacements | 6000 MiB | 40-41 |
 
 A 9451-token prompt was read at 149 tokens/s (32K) and 134 (128K). The server
@@ -264,6 +267,7 @@ the real file.
 
 - `run-qwen27b.sh`: starts Qwen3.8-27B with the settings measured above
 - `run-ornith27b.sh`: starts Ornith-1.5-27B-A3B-CoderX in hybrid mode with a long context
+- `run-lfm25.sh`: starts LFM2.5-24B-A2B in hybrid mode, 32K or 128K of context
 - `llama.cpp/`: the fork, branch `hybrid-moe`, on GitHub as
   [llama.cpp-hybrid-moe](https://github.com/MohammadR3za/llama.cpp-hybrid-moe)
   (git-ignored here, see `patches/`); its changes are up for review as pull request 1 there
