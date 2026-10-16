@@ -121,6 +121,53 @@ half the speed, with q8_0 keys and q4_0 values (9.5 and 8.2 tokens/s), took 1.6
 million for 8.5 GB (about 5 KB each), and the 50K chat 1.6 million for 5.8 GB.
 The launcher's first answer at 256K, right after loading, came at 10.0 tokens/s.
 
+## LFM2.5-24B-A2B
+
+LFM2.5-24B-A2B Q4_K_M (13.5 GiB, `lfm2moe`) has 40 blocks, 2
+of them dense and 38 with 64 experts of which 4 are used; 10 blocks have attention
+(8 KV heads, so about 11 KiB of KV per token in q8_0, computed from the file's
+head count and embedding size) and the other 30 a short convolution. Its file
+fits in the 15.7 GB of RAM, so once it is in the page cache nothing is read from
+the SSD: the last requests of a server read 0 MiB. Same flags as the Ornith
+table (`bench/bench.py`, `llama-bench -n 128 -t 8 --repack 0 -dev Vulkan1`),
+tokens/s:
+
+| Mode | tokens/s | peak VRAM |
+|---|---:|---:|
+| stock split, `-ncmoe 18` / 20 / 22 / 24 / 26 | 31.7 / 32.9 / **36.4** / 33.6 / 29.0 | 7634 / 7815 / 7165 / 6467 / 5768 MiB |
+| hybrid, cache 6000 MiB, no replacements | **50.1** | 6831 MiB |
+| hybrid, cache 6000 MiB, 1 replacement per step | 47.7 | 6831 MiB |
+| hybrid, cache 6800 MiB | 49.2 | 7636 MiB |
+| hybrid, cache 7200 MiB | 47.4 | 8038 MiB |
+| hybrid, cache 6800 MiB, 6 CPU threads | 50.3 | 7636 MiB |
+
+The `-ncmoe 20` and `26` runs were still reading the file in their last
+repetitions (32.0, 30.1, 33.9, 37.2 and 30.7, 32.8 tokens/s), so both are low.
+
+    llama-bench -m LFM2.5-24B-A2B-Q4_K_M.gguf -dev Vulkan1 -ngl 99 -ncmoe 40 --moe-cache-mib 6000 --moe-hybrid 8 --moe-hybrid-uploads 0 -t 8 --repack 0
+
+Hybrid mode runs 86% of the selected experts on the GPU with a 6000 MiB cache,
+90% with 6800 and 92% with 7200 or with a replacement per step; the speed does
+not rise with it (the CPU waits 0.06-0.13 ms per layer step in all of them),
+and with the 7200 MiB cache, 8038 MiB of VRAM, it was lower. Prompts,
+`-p 512`: 213.6 tokens/s for the stock split, 153.4 hybrid.
+
+In llama-server (`-fa on`, KV in q8_0, `--ctx-checkpoints 4 --cache-ram 1024`,
+a 256-token code answer at temperature 0) the first answers after loading run
+at 14-33 tokens/s while the file is read into the page cache, and then:
+
+| Context | Expert cache | tokens/s |
+|---|---:|---:|
+| 32K | 5800 MiB | 34-36 |
+| 128K | 5000 MiB | 26 |
+| 4K, KV in f16, no replacements | 6000 MiB | 40-41 |
+
+A 9451-token prompt was read at 149 tokens/s (32K) and 134 (128K). The server
+is slower than llama-bench with the same settings, 40 against 50, as it was
+with Ornith (24 against 32.6); `--no-repack` made no difference (33-36), nor did f16
+instead of q8_0 for the KV cache at 32K (35-36). Not measured: the quality of
+its answers.
+
 ## Qwen3.8-27B (dense)
 
     ./run-qwen27b.sh      # opens http://127.0.0.1:8080 once the model has loaded

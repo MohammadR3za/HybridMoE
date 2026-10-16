@@ -47,7 +47,8 @@ def main():
     cmd = [BENCH, *args, '-r', str(a.reps), '-o', 'jsonl']
     before = vmstat()
     t0 = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # -v prints the model's vocabulary, which is not always valid UTF-8 (LFM2.5's is not): replace, don't crash
+    proc = subprocess.run(cmd, capture_output=True, text=True, errors='replace')
     wall = time.time() - t0
     after = vmstat()
 
