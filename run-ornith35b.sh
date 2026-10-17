@@ -60,9 +60,14 @@ dev=$("$server" --list-devices 2>/dev/null | sed -n 's/^ *\(Vulkan[0-9]*\): .*RX
 # the server's caches of old chats and recurrent-state snapshots are capped. MTP drafts (13 tokens/s
 # against 34) did not pay off; a larger -ub costs answer speed (24-32 against 34) for a prompt that read at
 # 106-187 tokens/s against 110, so pass -b 2048 -ub 2048 only for long prompts.
-args=(-m "$model" -dev "$dev" --host 127.0.0.1 --port "$port"
+# The model's chat template raises "System message must be at the beginning" for the system messages that Claude Code
+# adds mid-conversation, so every request of its agent loop failed with a 500. templates/ornith-agents.jinja is the
+# same template with that one line rendering such a message as a user turn; it renders ordinary chats identically.
+template=$here/templates/ornith-agents.jinja
+[[ -f $template ]] || { echo "missing $template" >&2; exit 1; }
+args=(-m "$model" -dev "$dev" --host 127.0.0.1 --port "$port" --alias ornith-35b --chat-template-file "$template"
       -ngl 99 -ncmoe 41 --moe-cache-mib "$cache" --moe-hybrid 8 --moe-hybrid-uploads 0 -t 8
-      -c "$ctx" -ctk q8_0 -ctv q8_0 -fa on -np 1 --ctx-checkpoints 4 --cache-ram 1024)
+      -c "$ctx" -ctk q8_0 -ctv q8_0 -fa on -np 1 --ctx-checkpoints 4 --cache-ram 1024 --agent)
 case ${THINK:-on} in
     off) args+=(--reasoning off) ;;
     on)  ;;

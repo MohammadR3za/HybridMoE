@@ -197,6 +197,54 @@ Battle of Lepanto, "1871"; Wozzeck, "Ludwig Winter"; the neutron, "James
 Neutron". The tests are small and mine, and the coding gap is two tasks of one
 sample; the quiz gap is not that.
 
+## Claude Code and OpenCode
+
+llama-server speaks the Anthropic API (`/v1/messages`, with tool calls) and the OpenAI one, so both tools can use the
+model that `run-ornith35b.sh` serves:
+
+    ./run-ornith35b.sh                 # terminal 1: http://127.0.0.1:8080, 128K context
+    ./claude-local.sh                  # terminal 2, in your project: Claude Code on the local model
+    cp opencode.example.json my-project/opencode.json   # then `opencode` there; /models picks "Ornith 35B (local)"
+
+Anthropic does not support Claude Code with models other than Claude's; this works because the server imitates the API.
+`claude-local.sh` sets `ANTHROPIC_BASE_URL`, a dummy `ANTHROPIC_AUTH_TOKEN`, the model name, and
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` (read from the server; Claude Code assumes 200K for a model it does not know) for that
+process only, and uses its own config folder, `~/.claude-local`.
+
+**The chat template had to change.** The first requests all failed with HTTP 500, `Jinja Exception: System message
+must be at the beginning`: the model's template raises for a system message that is not the first message, and Claude
+Code sent one, so its loop retried forever. `templates/ornith-agents.jinja` is the model's own template with that one
+line rendering such a message as a user turn instead (`diff` it against the one in the GGUF); it renders the ordinary
+conversations tried (system and user, tool round trip, thinking history) byte for byte like the original. The
+launcher passes it with `--chat-template-file`, and names the model `ornith-35b` with `--alias`.
+
+Measured on the RX 580 with the 128K context (a task of one file written and run: "create hello.py that prints 1 to 5
+separated by commas, run it, say what it printed"; generation ran at about 21-23 tokens/s in all of them):
+
+| | first prompt | the task |
+|---|---:|---:|
+| Claude Code, all its tools | 15,749 tokens, 193 s | 3 turns, 208-215 s |
+| Claude Code, `--tools "Read,Write,Edit,Bash,Glob,Grep"` | 4,721 tokens, 61 s | 3 turns, 79 s |
+| the same, a second session (other folder, other task) with `--exclude-dynamic-system-prompt-sections` | 926 new tokens, 16 s | 3 turns, 36 s |
+| OpenCode | 7,428 tokens, 90 s | write, then `python3 hello.py`; 104 s |
+
+After the first prompt a step only sends what is new (21-73 tokens), so the server's cache works. Without
+`--exclude-dynamic-system-prompt-sections` a new Claude Code session read all 15,747 tokens again (190 s): the working
+folder and git status sit at the start of its prompt. Both tools got the right answer, `1,2,3,4,5`, and the server
+logged no errors in the final runs.
+
+Things to know:
+
+- A tiny task is all that was tried. How well a model with 3B active parameters handles a real refactor, or a
+  context that fills up, was not measured.
+- The model thinks before it answers, and ignores `thinking: {"type": "disabled"}` in the request; `THINK=off
+  ./run-ornith35b.sh` turns it off for the whole server.
+- OpenCode applies the *last* matching permission rule. With `"bash": {"python3 *": "allow", "*": "deny"}` the
+  catch-all won, the shell tool vanished, and the model's sub-agent kept rewriting and rereading `hello.py` for 59
+  steps in under 7 minutes; the order `{"*": "deny", "python3 *": "allow"}` worked. Run it with a time limit when trying new settings.
+- OpenCode's primary agent hands small jobs such as running a script to a "general" sub-agent, which is another
+  request with its own prompt on the server's single slot.
+
 ## LFM2.5-24B-A2B
 
     ./run-lfm25.sh    # 32K context; CTX=128k for the whole 128K
@@ -345,6 +393,7 @@ the real file.
 - `run-ornith27b.sh`: starts Ornith-1.5-27B-A3B-CoderX in hybrid mode with a long context
 - `run-lfm25.sh`: starts LFM2.5-24B-A2B in hybrid mode, 32K or 128K of context
 - `run-ornith35b.sh`: starts Ornith-1.5-35B-A3B (Q3_K_M) in hybrid mode, 128K of context by default
+- `claude-local.sh`, `opencode.example.json`, `templates/ornith-agents.jinja`: Claude Code and OpenCode on that server
 - `bench/quality/`: head-to-head tests of two servers: reasoning, code and instruction following (`qeval.py`), facts (`qknow.py`)
 - `llama.cpp/`: the fork, branch `hybrid-moe`, on GitHub as
   [llama.cpp-hybrid-moe](https://github.com/MohammadR3za/llama.cpp-hybrid-moe)
