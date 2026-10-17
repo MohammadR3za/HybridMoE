@@ -13,7 +13,12 @@ set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 server=$here/llama.cpp/build/bin/llama-server
-model=${MODEL:-$HOME/Downloads/Ornith-1.5-27B-A3B-CoderX.Q4_K_M.gguf}
+model=${MODEL:-}
+if [[ -z $model ]]; then
+    for dir in "$HOME/Desktop/LLMS" "$HOME/Downloads"; do
+        [[ -f $dir/Ornith-1.5-27B-A3B-CoderX.Q4_K_M.gguf ]] && { model=$dir/Ornith-1.5-27B-A3B-CoderX.Q4_K_M.gguf; break; }
+    done
+fi
 port=${PORT:-8080}
 log=${XDG_STATE_HOME:-$HOME/.local/state}/hybridmoe/ornith27b-server.log
 
@@ -30,7 +35,7 @@ case ${CTX:-256k} in
 esac
 
 [[ -x $server ]] || { echo "llama-server is not built yet: run $here/build.sh first" >&2; exit 1; }
-[[ -f $model ]] || { echo "model not found: $model (set MODEL=...)" >&2; exit 1; }
+[[ -f $model ]] || { echo "Ornith-1.5-27B-A3B-CoderX.Q4_K_M.gguf is not in ~/Desktop/LLMS or ~/Downloads (set MODEL=...)" >&2; exit 1; }
 if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
     echo "something is already listening on port $port: another server? (stop it, or set PORT=...)" >&2
     exit 1

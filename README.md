@@ -121,6 +121,82 @@ half the speed, with q8_0 keys and q4_0 values (9.5 and 8.2 tokens/s), took 1.6
 million for 8.5 GB (about 5 KB each), and the 50K chat 1.6 million for 5.8 GB.
 The launcher's first answer at 256K, right after loading, came at 10.0 tokens/s.
 
+## Ornith-1.5-35B-A3B (the full model)
+
+    ./run-ornith35b.sh    # 128K context; CTX=256k, 64k or 16k
+
+The file is bartowski's Q3_K_M (15.55 GiB, `qwen35moe`): the model CoderX was cut
+from, with all 256 experts per layer (8 used) and the same attention layout, so
+its KV cache costs what Ornith's does in "Long context". It includes the MTP
+head. `llama-bench` flags as in the first table; steady median of the last 4 of
+10 repetitions, which were still climbing a little, as 19-31 GB were read from
+the SSD per run:
+
+| Mode | tokens/s | peak VRAM |
+|---|---:|---:|
+| stock split, `-ncmoe 20` / 23 | 28.1 / 30.2 | 7949 / 7535 MiB |
+| hybrid, cache 5400 / **5800** / 6200 MiB, no replacements | 32.8 / **34.4** / 32.6 | 7015 / 7417 / 7819 MiB |
+| hybrid, cache 5800 MiB, 1 replacement per step | 30.7 | 7417 MiB |
+| hybrid, cache 5800 MiB, 6 / 10 CPU threads | 31.9 / 32.4 | 7417 MiB |
+
+With the 5800 MiB cache, 93.8% of the selected experts run on the GPU. In
+llama-server (KV in q8_0, `-ub 512`, a 256-token code answer at temperature 0,
+once the file is in the page cache; the launcher's own run at 128K gave 24.0):
+
+| Context | Expert cache | VRAM | tokens/s | 9650-token prompt |
+|---|---:|---:|---:|---:|
+| 16K | 5800 MiB | 7752 MiB | 34.0 | 110 tokens/s |
+| 64K | 5300 MiB | 7811 MiB | 30.3 | 80 |
+| 128K | 4600 MiB | 7853 MiB | 25.7 | 55 |
+| 256K | 3200 MiB | 7943 MiB | 18.2 | 60 |
+
+The speed falls as the context grows and the expert cache shrinks with it, roughly
+0.6-0.8 tokens/s per 100 MiB of cache. The first
+answers are slower while the experts the CPU needs are read from the SSD (code:
+17.9, 31.7, then 34; chat with a new question each time: 13.8, 22.8, 26.0, 29.9),
+so a new conversation starts slowly. Tried and not used, at 16K unless noted:
+
+- **MTP drafts** (`--spec-type draft-mtp --spec-draft-n-max 3`): 13.8 tokens/s on
+  code (131 of 370 drafts accepted) and 12 on chat, against 34 and 23-30 without
+  (probably because the 4-token check needs up to 4 times the experts per layer;
+  not measured).
+- **A larger batch**: `-ub 1024` gave 30.0 tokens/s (31.8 with a 5600 MiB cache)
+  and `-ub 2048` 24.1-27.4, against 34.0; the 9650-token prompt read at 106-151
+  and 141-187 tokens/s against 110, which varied between runs. Pass
+  `-b 2048 -ub 2048` for long prompts only.
+- **KV in q4_0**: at 256K with a 4400 MiB cache 20.0 tokens/s (70 for the prompt)
+  against 18.2; at 128K with 5200 MiB, 22.7 against 25.7.
+
+### Is it smarter than CoderX?
+
+`bench/quality/` has the tests; `qselfcheck.py` first shows that they accept
+correct code and reject wrong code. The models think, at temperature 0.6, with
+one sample per task and 8000 tokens at most. `qeval.py` asks 10 numeric
+questions (answers computed by the script), 8 coding tasks (the model's code
+runs in `bwrap`, read-only and without network, against hidden tests, some with
+speed limits), and 3 instruction-following checks:
+
+| | passed of 21 | missed |
+|---|---:|---|
+| Ornith-1.5-35B-A3B Q3_K_M | **20** | one coding task, out of tokens while thinking |
+| Ornith-1.5-27B-A3B-CoderX Q4_K_M | 18 | digit sum of 2^100 (121, not 115), string distance, the same coding task |
+
+`qknow.py` asks 49 factual questions with short answers (a capital, an author,
+a year), at temperature 0 and without thinking (LFM2.5 always thinks):
+
+| | correct of 49 |
+|---|---:|
+| Ornith-1.5-35B-A3B Q3_K_M | **49** |
+| Qwen3.8-27B Q4_K_M | **49** |
+| LFM2.5-24B-A2B Q4_K_M | 48 (one empty answer) |
+| Ornith-1.5-27B-A3B-CoderX Q4_K_M | **22** |
+
+CoderX, a pruned copy with 72 of 256 experts per layer removed, invents answers:
+the capital of Burkina Faso, "Burkina Faso doesn't have a capital city"; the
+Battle of Lepanto, "1871"; Wozzeck, "Ludwig Winter"; the neutron, "James
+Neutron". The tests are small and mine, and the coding gap is two tasks of one
+sample; the quiz gap is not that.
+
 ## LFM2.5-24B-A2B
 
     ./run-lfm25.sh    # 32K context; CTX=128k for the whole 128K
@@ -268,6 +344,8 @@ the real file.
 - `run-qwen27b.sh`: starts Qwen3.8-27B with the settings measured above
 - `run-ornith27b.sh`: starts Ornith-1.5-27B-A3B-CoderX in hybrid mode with a long context
 - `run-lfm25.sh`: starts LFM2.5-24B-A2B in hybrid mode, 32K or 128K of context
+- `run-ornith35b.sh`: starts Ornith-1.5-35B-A3B (Q3_K_M) in hybrid mode, 128K of context by default
+- `bench/quality/`: head-to-head tests of two servers: reasoning, code and instruction following (`qeval.py`), facts (`qknow.py`)
 - `llama.cpp/`: the fork, branch `hybrid-moe`, on GitHub as
   [llama.cpp-hybrid-moe](https://github.com/MohammadR3za/llama.cpp-hybrid-moe)
   (git-ignored here, see `patches/`); its changes are up for review as pull request 1 there
